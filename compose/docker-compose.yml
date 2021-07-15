@@ -1,0 +1,116 @@
+version: '3.8'
+x-common:
+  database:
+    &db-environment
+    # Do not remove the "&db-password" from the end of the line below, it is important
+    # for Panel functionality.
+    MYSQL_PASSWORD: &db-password "password"
+    MYSQL_ROOT_PASSWORD: &root-password "rootpassword"
+  panel:
+    &panel-environment
+    APP_URL: "https://panel.localhost"
+    # A list of valid timezones can be found here: http://php.net/manual/en/timezones.php
+    APP_TIMEZONE: "UTC"
+    APP_SERVICE_AUTHOR: "noreply@example.com"
+    # Uncomment the line below and set to a non-empty value if you want to use Let's Encrypt
+    # to generate an SSL certificate for the Panel.
+    # LE_EMAIL: ""
+  mail:
+    &mail-environment
+    MAIL_FROM: "noreply@example.com"
+    MAIL_DRIVER: "smtp"
+    MAIL_HOST: "mail"
+    MAIL_PORT: "1025"
+    MAIL_USERNAME: ""
+    MAIL_PASSWORD: ""
+    MAIL_ENCRYPTION: "true"
+
+#
+# ------------------------------------------------------------------------------------------
+# DANGER ZONE BELOW
+#
+# The remainder of this file likely does not need to be changed. Please only make modifications
+# below if you understand what you are doing.
+#
+
+services:
+
+  traefik:
+    image: traefik:v2.3
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "${DATA_DIR}/traefik/traefik.toml:/etc/traefik/traefik.toml"
+      - "${DATA_DIR}/traefik/acme.json:/acme.json"
+
+  database:
+    image: library/mysql:8.0
+    restart: always
+    command: --default-authentication-plugin=mysql_native_password
+    volumes:
+      - "${DATA_DIR}/database:/var/lib/mysql"
+    environment:
+      <<: *db-environment
+      MYSQL_DATABASE: "panel"
+      MYSQL_USER: "pterodactyl"
+
+  cache:
+    image: redis:alpine
+    restart: always
+
+  panel:
+    image: ghcr.io/pterodactyl/panel:v1.4.2
+    restart: always
+    links:
+      - database
+      - cache
+    volumes:
+      - "${DATA_DIR}/panel/var/:/app/var/"
+      - "${DATA_DIR}/panel/nginx/:/etc/nginx/conf.d/"
+      - "${DATA_DIR}/panel/certs/:/etc/letsencrypt/"
+      - "${DATA_DIR}/panel/logs/:/app/storage/logs"
+    labels:
+      - "traefik.http.routers.pterodactyl-panel.rule=Host(`${PTERODACTYL_PANEL_DOMAIN}`)"
+      - "traefik.http.routers.pterodactyl-panel.tls=true"
+      - "traefik.http.routers.pterodactyl-panel.tls.certresolver=letsencrypt"
+    environment:
+      <<: *panel-environment
+      <<: *mail-environment
+      DB_PASSWORD: *db-password
+      APP_ENV: "production"
+      APP_ENVIRONMENT_ONLY: "false"
+      CACHE_DRIVER: "redis"
+      SESSION_DRIVER: "redis"
+      QUEUE_DRIVER: "redis"
+      REDIS_HOST: "cache"
+      DB_HOST: "database"
+
+  ghost:
+    image: ghost:4-alpine
+    restart: always
+    links:
+      - database
+    ports:
+      - 8080:2368
+    environment:
+      # see https://ghost.org/docs/config/#configuration-options
+      database__client: mysql
+      database__connection__host: database
+      database__connection__user: root
+      database__connection__password: *root-password
+      database__connection__database: ghost
+      # this url value is just an example, and is likely wrong for your environment!
+      url: http://${GHOST_DOMAIN}
+    labels:
+      - "traefik.http.routers.ghost.rule=Host(`${GHOST_DOMAIN}`)"
+      - "traefik.http.routers.ghost.tls=true"
+      - "traefik.http.routers.ghost.tls.certresolver=letsencrypt"
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
